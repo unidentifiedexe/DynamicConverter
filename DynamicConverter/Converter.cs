@@ -36,6 +36,15 @@ namespace DynamicConverter
 
         private static bool TryConvertHelper<TSource>(TSource source, out object value, Type targetType)
         {
+            if (source is null)
+            {
+                value = null;
+                if (targetType.IsValueType)
+                    return false;
+                else
+                    return true;
+            }
+
             var sourceType = source.GetType();
             if (targetType.IsAssignableFrom(sourceType))
             {
@@ -48,29 +57,34 @@ namespace DynamicConverter
             }
 
             var type = targetType;
-            var ctorInfo = type.GetConstructor(Array.Empty<Type>());
+            var propaties = GeterPropaties(source);
 
-            if (ctorInfo == null)
+
+            if (!GetInstance(propaties, out value, type))
             {
                 value = default;
                 return false;
             }
 
-            value = ctorInfo.Invoke(new object[0]);
-
-            var propaties = GeterPropaties(source);
-
             foreach (var item in SeterPropaties(type).Where(p => propaties.ContainsKey(p.Name)))
             {
-                var val = propaties[item.Name];
-                if (val != null)
-                    TryConvertHelper(val, out val, item.PropertyType);
-                if (val == null && item.PropertyType.IsValueType)
+                if(item is FieldInfo fieldInfo)
                 {
-                    var ctor = item.PropertyType.GetConstructor(Type.EmptyTypes);
-                    val = ctor?.Invoke(null, Type.EmptyTypes);
+                    if (TryConvertHelper(propaties[item.Name], out var val, fieldInfo.FieldType))
+                        fieldInfo.SetValue(value, val);
                 }
-                item.SetValue(value, val);
+                else if(item is PropertyInfo propertyInfo)
+                {
+
+                    if (TryConvertHelper(propaties[item.Name], out var val, propertyInfo.PropertyType))
+                        propertyInfo.SetValue(value, val);
+                }
+#if DEBUG
+                else
+                {
+                    throw new Exception();
+                }
+#endif
             }
 
             return true;
@@ -87,7 +101,6 @@ namespace DynamicConverter
             return source;
         }
 
-
         private static IDictionary<string, object> GeterPropaties<T>(T source)
         {
             if (source is ExpandoObject obj)
@@ -99,25 +112,89 @@ namespace DynamicConverter
             }
         }
 
-
-        private static IEnumerable<PropertyInfo> SeterPropaties(Type type)
+        private static IEnumerable<MemberInfo> SeterPropaties(Type type)
         {
             var propFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.SetProperty;
             var fieldFlags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.SetField;
-            //var huga = type.GetProperties(propFlags);
-            //var hoge = type.GetProperties(propFlags)
-            //    .Where(p => p.GetSetMethod(HasFourceSetAttribute(p)) != null);
+
             return
                 type.GetProperties(propFlags)
                 .Where(p => p.GetSetMethod(HasFourceSetAttribute(p)) != null)
-                .Concat(type.GetProperties(fieldFlags));
+                .Concat<MemberInfo>(type.GetFields(fieldFlags));
 
-
-            bool HasFourceSetAttribute(PropertyInfo info)
+            static bool HasFourceSetAttribute(PropertyInfo info)
             {
                 return info?.GetCustomAttribute(typeof(ForceSetAttribute)) != null;
             }
         }
 
+
+        private static bool GetInstance(IDictionary<string, object> sourceDic, out object value, Type targetType)
+        {
+
+            var ctorInfos = targetType.GetConstructors()
+                .Select(p => new ParamInfo(p))
+                .Where(p => p.IsTurget())
+                .OrderByDescending(p => p.Priority)
+                .ToArray();
+
+            foreach (var ctorInfo in ctorInfos)
+            {
+                var args = Itr().ToArray();
+                if(ctorInfo.Parametors.Length == args.Length)
+                {
+                    value = ctorInfo.Info.Invoke(args);
+                    return true;
+                }
+                IEnumerable<object> Itr()
+                {
+
+                    foreach (var (info, name) in ctorInfo.Parametors.Zip(ctorInfo.GetParamNames, (info, name) => (info, name)))
+                    {
+                        if (!sourceDic.TryGetValue(name, out object obj))
+                            yield break;
+                        if (!TryConvertHelper(obj, out var val, info.ParameterType))
+                            yield break;
+
+                        yield return val;
+                    }
+                }
+            }
+
+            value = null;
+            return false;
+        }
+
+        private struct ParamInfo
+        {
+            private readonly ConstructorInfo _info;
+            public ConstructorInfo Info => _info;
+
+            private readonly OptionalConstructorAttribute _attribute;
+
+
+            private ParameterInfo[] _parameters;
+            public ParameterInfo[] Parametors => _parameters ??= _info.GetParameters();
+
+            public ICollection<string> GetParamNames => _attribute?.ParamNames ?? Array.Empty<string>();
+
+            public int Priority => _attribute?.Priority ?? 0;
+            public ParamInfo(ConstructorInfo info)
+            {
+                _info = info;
+                _parameters = null;
+                _attribute = _info.GetCustomAttribute<OptionalConstructorAttribute>();
+            }
+
+            public bool IsTurget()
+            {
+                if (Parametors.Length == 0) return true;
+                if (_attribute == null) return false;
+                if (_attribute.ParamNames.Count == Parametors.Length)
+                    return true;
+                else 
+                    return false;
+            }
+        }
     }
 }

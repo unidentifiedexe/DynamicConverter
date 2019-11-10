@@ -10,6 +10,15 @@ namespace ManualTester
     {
         static void Main(string[] args)
         {
+            object x = null;
+            Hoge y = (Hoge)x;
+
         }
+
+        struct Hoge {
+
+           public int X { get; set; }
+        }
+
     }
 }
